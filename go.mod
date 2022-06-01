@@ -1,3 +1,3 @@
-module github.com/optix2000/go-nsdctl
+module github.com/gauzy-gossamer/go-nsdctl
 
 go 1.13
