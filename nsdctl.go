@@ -41,6 +41,9 @@ var configDefaults = map[string]config{
 		certFile: nsdConfig{
 			"control-cert-file",
 			"/etc/nsd/nsd_control.pem"},
+		hostString: nsdConfig{
+			"control-interface",
+			"127.0.0.1"},
 	},
 	// Taken from https://www.unbound.net/documentation/unbound.conf.html
 	"unbound": {
@@ -60,6 +63,9 @@ var configDefaults = map[string]config{
 			"control-cert-file",
 			"unbound_control.pem",
 		},
+		hostString: nsdConfig{
+			"control-interface",
+			"127.0.0.1"},
 	},
 }
 
@@ -71,6 +77,7 @@ type config struct {
 	caFile   nsdConfig
 	certFile nsdConfig
 	keyFile  nsdConfig
+	hostString nsdConfig
 }
 
 // nsdConfig contains what the config file line looks like and the default
@@ -113,6 +120,8 @@ type NSDClient struct {
 	Connection net.Conn
 	// protocol is the NSD protocol type (see supportedProtocols)
 	protocol *protocol
+
+	unixSocket bool
 }
 
 // NewClientFromConfig tries to autodetect and create a new NSDClient from an config file
@@ -145,6 +154,7 @@ func NewClientFromConfig(configPath string) (*NSDClient, error) {
 	reCAFile, err := regexp.Compile(conf.caFile.Config + ": *([a-zA-Z0-9/]+)(?:#.*)?")
 	reKeyFile, err := regexp.Compile(conf.keyFile.Config + ": *([a-zA-Z0-9/]+)(?:#.*)?")
 	reCertFile, err := regexp.Compile(conf.certFile.Config + ": *([a-zA-Z0-9/]+)(?:#.*)?")
+	reHostString, err := regexp.Compile(conf.hostString.Config + ": *\"?([a-zA-Z0-9_/.]+)\"?(?:#.*)?")
 
 	var port uint
 	var hostString, caFile, keyFile, certFile string
@@ -182,21 +192,33 @@ func NewClientFromConfig(configPath string) (*NSDClient, error) {
 				certFile = res[1]
 			}
 		}
+		if hostString == "" {
+			res := reHostString.FindStringSubmatch(line)
+			if res != nil {
+				hostString = res[1]
+			}
+		}
 	}
 	err = scanner.Err()
 	if err != nil {
 		return nil, err
 	}
 
-	if port != 0 {
-		hostString = "127.0.0.1:" + string(port)
+	unixSocket := false
+	if hostString != "" && hostString[0] == '/' {
+		unixSocket = true
 	}
 
-	return NewClient(detectedType, hostString, caFile, keyFile, certFile, false)
+	if port != 0 && !unixSocket {
+		hostString = "127.0.0.1:" + strconv.Itoa(int(port))
+	}
+
+	return NewClient(detectedType, hostString, caFile, keyFile, certFile, false, unixSocket)
 }
 
+
 // NewClient creates a complete new NSDClient and returns any errors encountered
-func NewClient(serverType string, hostString string, caFile string, keyFile string, certFile string, skipVerify bool) (*NSDClient, error) {
+func NewClient(serverType string, hostString string, caFile string, keyFile string, certFile string, skipVerify bool, _unixSocket ...bool) (*NSDClient, error) {
 	protocol, ok := supportedProtocols[serverType]
 	if !ok {
 		return nil, errors.New("Server Type not Supported")
@@ -217,6 +239,14 @@ func NewClient(serverType string, hostString string, caFile string, keyFile stri
 		certFile = defaults.certFile.Default
 	}
 
+	unixSocket := false
+	if len(_unixSocket) > 0 {
+		unixSocket = _unixSocket[0]
+	} else if len(hostString) > 6 && hostString[:6] == "unix:/" {
+		unixSocket = true
+		hostString = hostString[5:]
+	}
+
 	// Set up connection
 	dialer := &net.Dialer{
 		// TODO: Don't hardcode these
@@ -232,33 +262,36 @@ func NewClient(serverType string, hostString string, caFile string, keyFile stri
 		HostString: hostString,
 		Dialer:     dialer,
 		protocol:   &protocol,
+		unixSocket: unixSocket,
 	}
 
-	clientCertKeyPair, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, err
-	}
-
-	rootCAs, err := x509.SystemCertPool()
-	if err != nil {
-		return nil, err
-	}
-
-	buf, err := ioutil.ReadFile(caFile)
-	if err != nil {
-		fmt.Println("Could not load provided CA certificate(s). Using only system CAs.")
-	} else {
-		ok = rootCAs.AppendCertsFromPEM(buf)
-		if !ok {
-			fmt.Println("Could not load provided CA certificate(s). Using only system CAs.")
+	if !unixSocket {
+		clientCertKeyPair, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, err
 		}
-	}
 
-	client.TLSClientConfig = &tls.Config{
-		Certificates:       []tls.Certificate{clientCertKeyPair},
-		RootCAs:            rootCAs,
-		ServerName:         protocol.ServerName,
-		InsecureSkipVerify: skipVerify,
+		rootCAs, err := x509.SystemCertPool()
+		if err != nil {
+			return nil, err
+		}
+
+		buf, err := ioutil.ReadFile(caFile)
+		if err != nil {
+			fmt.Println("Could not load provided CA certificate(s). Using only system CAs.")
+		} else {
+			ok = rootCAs.AppendCertsFromPEM(buf)
+			if !ok {
+				fmt.Println("Could not load provided CA certificate(s). Using only system CAs.")
+			}
+		}
+
+		client.TLSClientConfig = &tls.Config{
+			Certificates:       []tls.Certificate{clientCertKeyPair},
+			RootCAs:            rootCAs,
+			ServerName:         protocol.ServerName,
+			InsecureSkipVerify: skipVerify,
+		}
 	}
 
 	r, err := client.Command("status")
@@ -282,8 +315,14 @@ func (n *NSDClient) attemptConnection() error {
 	if n.Connection != nil {
 		n.Connection.Close()
 	}
+	var conn net.Conn
+	var err error
 
-	conn, err := tls.DialWithDialer(n.Dialer, "tcp", n.HostString, n.TLSClientConfig)
+	if n.unixSocket {
+		conn, err = net.Dial("unix", n.HostString)
+        } else {
+		conn, err = tls.DialWithDialer(n.Dialer, "tcp", n.HostString, n.TLSClientConfig)
+	}
 	if err != nil {
 		return err
 	}
