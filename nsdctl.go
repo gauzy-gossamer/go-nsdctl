@@ -151,9 +151,9 @@ func NewClientFromConfig(configPath string) (*NSDClient, error) {
 
 	conf := configDefaults[detectedType]
 	rePort, err := regexp.Compile(conf.port.Config + ": *([0-9]+)(?:#.*)?")
-	reCAFile, err := regexp.Compile(conf.caFile.Config + ": *([a-zA-Z0-9/]+)(?:#.*)?")
-	reKeyFile, err := regexp.Compile(conf.keyFile.Config + ": *([a-zA-Z0-9/]+)(?:#.*)?")
-	reCertFile, err := regexp.Compile(conf.certFile.Config + ": *([a-zA-Z0-9/]+)(?:#.*)?")
+	reCAFile, err := regexp.Compile(conf.caFile.Config + ": *([a-zA-Z0-9_/\\.]+)(?:#.*)?")
+	reKeyFile, err := regexp.Compile(conf.keyFile.Config + ": *([a-zA-Z0-9_/\\.]+)(?:#.*)?")
+	reCertFile, err := regexp.Compile(conf.certFile.Config + ": *([a-zA-Z0-9_/\\.]+)(?:#.*)?")
 	reHostString, err := regexp.Compile(conf.hostString.Config + ": *\"?([a-zA-Z0-9_/.]+)\"?(?:#.*)?")
 
 	var port uint
